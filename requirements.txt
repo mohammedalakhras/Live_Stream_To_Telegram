@@ -4,3 +4,4 @@ telethon
 nest_asyncio
 PySocks
 ffmpeg-python
+ffmpeg
