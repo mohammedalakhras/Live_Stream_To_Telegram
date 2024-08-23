@@ -112,4 +112,4 @@ async def main():
 #     loop.run_forever()
 inputs = []
 output = "text"
-gr.Interface(fn=main, inputs=inputs, outputs=output).launch()
+gr.Interface(fn=main, inputs=inputs, outputs=output).launch(server_port='0.0.0.0')
