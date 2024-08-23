@@ -84,6 +84,8 @@ async def main():
                 # 'ratelimit': 1000000,  # تحديد الحد الأقصى لسرعة التحميل
                 # 'sleep_interval': 10,  # تأخير بين تحميلات كل جزء
                 # 'max_sleep_interval': 20
+                'username': os.environ['GUser'],  # استبدل YOUR_USERNAME باسم المستخدم الخاص بك
+                'password': os.environ['GPass'], 
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=True)
