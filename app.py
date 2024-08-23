@@ -66,7 +66,7 @@ async def main():
         'bot',
         API_ID,
         API_HASH,
-        proxy=proxy
+        # proxy=proxy
     )
 
     @client.on(events.NewMessage(pattern='/start'))
