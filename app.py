@@ -80,10 +80,10 @@ async def main():
             ydl_opts = {
                 'format': 'bestaudio',
                 'outtmpl': 'downloaded_audio.%(ext)s',
-                'cookiefile': 'cookies.txt',  # إذا كنت تستخدم ملفات تعريف الارتباط
-                'ratelimit': 1000000,  # تحديد الحد الأقصى لسرعة التحميل
-                'sleep_interval': 10,  # تأخير بين تحميلات كل جزء
-                'max_sleep_interval': 20
+                # 'cookiefile': 'cookies.txt',  # إذا كنت تستخدم ملفات تعريف الارتباط
+                # 'ratelimit': 1000000,  # تحديد الحد الأقصى لسرعة التحميل
+                # 'sleep_interval': 10,  # تأخير بين تحميلات كل جزء
+                # 'max_sleep_interval': 20
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=True)
