@@ -1,0 +1,6 @@
+yt_dlp
+gradio
+telethon
+nest_asyncio
+PySocks
+ffmpeg-python
