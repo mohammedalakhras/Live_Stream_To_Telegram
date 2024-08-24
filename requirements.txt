@@ -5,3 +5,4 @@ nest_asyncio
 PySocks
 ffmpeg-python
 ffmpeg
+imageio_ffmpeg
