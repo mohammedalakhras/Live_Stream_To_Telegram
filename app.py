@@ -8,7 +8,8 @@ import nest_asyncio
 import gradio as gr
 import asyncio
 import requests
-import ffmpeg
+import imageio_ffmpeg as ffmpeg
+
 
 
 nest_asyncio.apply()
