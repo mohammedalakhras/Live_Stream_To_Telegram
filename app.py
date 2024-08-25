@@ -6,6 +6,9 @@ import asyncio
 import requests
 import ffmpeg
 import nest_asyncio
+import http.server
+import socketserver
+import threading
 
 nest_asyncio.apply()
 
@@ -95,6 +98,14 @@ async def main():
     await client.start(bot_token=BOT_TOKEN)
     print("Bot is running...")
     await client.run_until_disconnected()
-
+def run_dummy_server():
+    PORT = 1000
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"Serving at port {PORT}")
+        httpd.serve_forever()
 if __name__ == "__main__":
+    # تشغيل خادم ويب بسيط في خيط منفصل
+    server_thread = threading.Thread(target=run_dummy_server)
+    server_thread.start()
     asyncio.run(main())
