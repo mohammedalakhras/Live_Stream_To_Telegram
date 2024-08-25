@@ -1,15 +1,11 @@
 from telethon import TelegramClient, events
 import socks
 import os
-import subprocess
 import logging
-# import yt_dlp
-import nest_asyncio
-import gradio as gr
 import asyncio
 import requests
 import ffmpeg
-
+import nest_asyncio
 
 nest_asyncio.apply()
 
@@ -99,10 +95,6 @@ async def main():
     await client.start(bot_token=BOT_TOKEN)
     print("Bot is running...")
     await client.run_until_disconnected()
-# if __name__ == "__main__":
-#     loop = asyncio.get_event_loop()
-#     loop.create_task(main())
-#     loop.run_forever()
-inputs = []
-output = "text"
-gr.Interface(fn=main, inputs=inputs, outputs=output).launch(server_name="0.0.0.0",server_port=10000)
+
+if __name__ == "__main__":
+    asyncio.run(main())
