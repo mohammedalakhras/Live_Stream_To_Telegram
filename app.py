@@ -36,6 +36,8 @@ file_list = [f"{str(i).zfill(3)}.mp3" for i in file_range]  # توليد أسم�
 
 async def main():
     def stream_audio(audio_path):
+        result = subprocess.run(['which', 'ffmpeg'], stdout=subprocess.PIPE)
+        ffmpeg_path = result.stdout.decode().strip()
         # بث الصوت باستخدام FFmpeg
         (
             ffmpeg
@@ -47,7 +49,7 @@ async def main():
                 audio_bitrate='128k',  # معدل البت للصوت
                 vn=None  # تجاهل الفيديو
             )
-            .run()
+            .run(cmd=ffmpeg_path)
         )
 
     proxy_server = '188.165.192.99'
