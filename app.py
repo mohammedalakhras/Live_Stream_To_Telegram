@@ -50,7 +50,7 @@ async def main():
                 audio_bitrate='128k',  # معدل البت للصوت
                 vn=None  # تجاهل الفيديو
             )
-            .run(cmd="/usr/bin/ffmpeg")
+            .run(cmd="/bin/bash")
         )
 
     proxy_server = '188.165.192.99'
