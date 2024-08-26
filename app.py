@@ -36,22 +36,35 @@ file_range = list(range(1, 115))  # الأرقام من 1 إلى 114
 file_list = [f"{str(i).zfill(3)}.mp3" for i in file_range]  # توليد أسماء الملفات مع الصفر في البداية
 
 async def main():
+    # def stream_audio(audio_path):
+    #     # result = subprocess.run(['which', 'ffmpeg'], stdout=subprocess.PIPE)
+    #     # ffmpeg_path = result.stdout.decode().strip()
+    #     # بث الصوت باستخدام FFmpeg
+    #     (
+    #         ffmpeg
+    #         .input(audio_path, re=None)  # قراءة الملف بالوقت الحقيقي
+    #         .output(
+    #             SERVER_URL + STREAM_KEY,  # رابط البث
+    #             format='flv',  # صيغة الإخراج
+    #             acodec='aac',  # ترميز الصوت
+    #             audio_bitrate='128k',  # معدل البت للصوت
+    #             vn=None  # تجاهل الفيديو
+    #         )
+    #         .run(cmd="/bin/bash" , capture_stderr=True)
+    #     )
     def stream_audio(audio_path):
-        # result = subprocess.run(['which', 'ffmpeg'], stdout=subprocess.PIPE)
-        # ffmpeg_path = result.stdout.decode().strip()
-        # بث الصوت باستخدام FFmpeg
-        (
-            ffmpeg
-            .input(audio_path, re=None)  # قراءة الملف بالوقت الحقيقي
-            .output(
-                SERVER_URL + STREAM_KEY,  # رابط البث
-                format='flv',  # صيغة الإخراج
-                acodec='aac',  # ترميز الصوت
-                audio_bitrate='128k',  # معدل البت للصوت
-                vn=None  # تجاهل الفيديو
-            )
-            .run(cmd="/bin/bash" , capture_stderr=True)
-        )
+    try:
+        subprocess.run([
+            'ffmpeg',
+            '-re',  # Read input at native frame rate
+            '-i', audio_path,
+            '-acodec', 'aac',
+            '-b:a', '128k',
+            '-f', 'flv',
+            f'{SERVER_URL}/{STREAM_KEY}'
+        ], check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"FFmpeg error: {e}")
 
     proxy_server = '188.165.192.99'
     proxy_port = 63615
