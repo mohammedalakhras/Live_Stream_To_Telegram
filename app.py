@@ -53,18 +53,18 @@ async def main():
     #         .run(cmd="/bin/bash" , capture_stderr=True)
     #     )
     def stream_audio(audio_path):
-    try:
-        subprocess.run([
-            'ffmpeg',
-            '-re',  # Read input at native frame rate
-            '-i', audio_path,
-            '-acodec', 'aac',
-            '-b:a', '128k',
-            '-f', 'flv',
-            f'{SERVER_URL}/{STREAM_KEY}'
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        logging.error(f"FFmpeg error: {e}")
+        try:
+            subprocess.run([
+                'ffmpeg',
+                '-re',  # Read input at native frame rate
+                '-i', audio_path,
+                '-acodec', 'aac',
+                '-b:a', '128k',
+                '-f', 'flv',
+                f'{SERVER_URL}/{STREAM_KEY}'
+            ], check=True)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FFmpeg error: {e}")
 
     proxy_server = '188.165.192.99'
     proxy_port = 63615
