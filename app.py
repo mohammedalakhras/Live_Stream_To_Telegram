@@ -5,6 +5,7 @@ import logging
 import asyncio
 import requests
 import ffmpeg
+import subprocess
 import nest_asyncio
 import http.server
 import socketserver
