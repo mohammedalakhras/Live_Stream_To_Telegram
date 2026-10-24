@@ -3,7 +3,6 @@ import shutil
 import asyncio
 import logging
 import time
-import yt_dlp
 import concurrent.futures
 
 from datetime import datetime, timezone
