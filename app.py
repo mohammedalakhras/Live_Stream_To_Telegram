@@ -118,18 +118,19 @@ async def get_video_duration(filename: str) -> float:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        # مهلة 10 ثوانٍ لمنع التعليق المستمر
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         duration_str = stdout.decode().strip()
         if duration_str:
             return float(duration_str)
+    except asyncio.TimeoutError:
+        proc.kill()
+        logger.error(f"انقضت المهلة: ffprobe عالق في قراءة الملف {filename}")
     except Exception as e:
-        logger.warning(f"تعذر حساب المدة بـ ffprobe: {e}")
+        logger.error(f"خطأ أثناء حساب مدة {filename}: {e}")
 
-    # fallback
-    from moviepy.editor import VideoFileClip
-    with VideoFileClip(filename) as clip:
-        return float(clip.duration)
-
+    # إرجاع 0.0 يشير إلى أن الملف معطوب ويجب إعادة تحميله
+    return 0.0
 
 async def start_video_stream():
     prefetch_task = None
@@ -139,7 +140,6 @@ async def start_video_stream():
 
         stream_state["status"] = "جاري الاتصال بتيلغرام وتشغيل PyTgCalls..."
         
-        # الاعتماد على SESSION_STRING بدلاً من الملفات
         app = Client(
             "my_acc",
             session_string=SESSION_STRING,
@@ -159,6 +159,7 @@ async def start_video_stream():
                 surah_name = SURAH_NAMES[surah_num - 1]
                 next_surah_name = SURAH_NAMES[surah_num % 114]
 
+                # التحميل المسبق للدفعات (Prefetch)
                 if surah_num == 45:
                     prefetch_task = asyncio.create_task(
                         download_videos_from_drive(FOLDER_URL_2, "vid2")
@@ -174,40 +175,79 @@ async def start_video_stream():
                     await prefetch_task
                     shutil.rmtree("vid2", ignore_errors=True)
 
-                if not os.path.exists(video_path):
-                    logger.warning(f"الملف {video_path} غير موجود، يتم التخطي...")
-                    await asyncio.sleep(2)
-                    continue
+                # حلقة لا نهائية فرعية لضمان عدم تخطي السورة الحالية
+                is_played = False
+                retry_count = 0
+                
+                while not is_played:
+                    # 1. التحقق من وجود الملف
+                    if not os.path.exists(video_path):
+                        logger.warning(f"الملف {video_path} غير موجود. جاري إعادة التحميل...")
+                        duration = 0.0
+                    else:
+                        # 2. حساب المدة (ترجع 0.0 إذا كان الملف معطوباً)
+                        duration = await get_video_duration(video_path)
 
-                try:
-                    duration = await get_video_duration(video_path)
+                    # 3. معالجة الملف المعطوب أو المفقود
+                    if duration == 0.0:
+                        retry_count += 1
+                        logger.error(f"الملف {video_path} معطوب أو مفقود. المحاولة رقم {retry_count}")
+                        stream_state["status"] = f"إعادة تحميل السورة الحالية ({retry_count})..."
+                        
+                        # حذف النسخة التالفة
+                        if os.path.exists(video_path):
+                            os.remove(video_path)
+                            
+                        # إعادة تحميل الدفعة الصحيحة بناءً على رقم السورة
+                        if 1 <= surah_num <= 50:
+                            await download_videos_from_drive(FOLDER_URL_1, "vid")
+                        elif 51 <= surah_num <= 100:
+                            await download_videos_from_drive(FOLDER_URL_2, "vid2")
+                        else:
+                            await download_videos_from_drive(FOLDER_URL_3, "vid3")
+                            
+                        await asyncio.sleep(5)
+                        continue  # إعادة فحص الملف في الدورة القادمة للحلقة while
 
-                    stream_state.update({
-                        "status": "يبث مباشرة الآن 🟢",
-                        "is_streaming": True,
-                        "current_surah_index": surah_num,
-                        "current_surah_name": f"سورة {surah_name}",
-                        "next_surah_name": f"سورة {next_surah_name}",
-                        "current_file": video_path,
-                        "duration_seconds": round(duration, 1),
-                        "started_at_ts": time.time(),
-                        "last_error": None,
-                    })
+                    # 4. بث السورة السليمة
+                    try:
+                        stream_state.update({
+                            "status": "يبث مباشرة الآن 🟢",
+                            "is_streaming": True,
+                            "current_surah_index": surah_num,
+                            "current_surah_name": f"سورة {surah_name}",
+                            "next_surah_name": f"سورة {next_surah_name}",
+                            "current_file": video_path,
+                            "duration_seconds": round(duration, 1),
+                            "started_at_ts": time.time(),
+                            "last_error": None,
+                        })
 
-                    await pytgcalls.play(
-                        chat.id,
-                        MediaStream(video_path),
-                    )
-                    logger.info(f"بدأ بث: سورة {surah_name} ({video_path}) - المدة: {duration:.1f} ثانية")
+                        # مهلة 30 ثانية لتجنب تعليق الاتصال بخوادم تيلغرام
+                        await asyncio.wait_for(
+                            pytgcalls.play(chat.id, MediaStream(video_path)),
+                            timeout=30.0
+                        )
+                        logger.info(f"بدأ بث: سورة {surah_name} ({video_path}) - المدة: {duration:.1f} ثانية")
 
-                    await asyncio.sleep(duration + 2)
+                        # الانتظار حتى تنتهي السورة تماماً
+                        await asyncio.sleep(duration + 2)
+                        
+                        # نجاح العملية يكسر حلقة إعادة المحاولة
+                        is_played = True
 
-                except Exception as e:
-                    err_msg = str(e)
-                    logger.error(f"حدث خطأ أثناء بث {video_path}: {err_msg}")
-                    stream_state["last_error"] = err_msg
-                    await asyncio.sleep(5)
+                    except asyncio.TimeoutError:
+                        err_msg = "انقضت المهلة (Timeout) أثناء الاتصال بتيلغرام."
+                        logger.error(f"فشل تشغيل {video_path}: {err_msg}")
+                        stream_state["last_error"] = err_msg
+                        await asyncio.sleep(5)
+                    except Exception as e:
+                        err_msg = str(e)
+                        logger.error(f"حدث خطأ أثناء بث {video_path}: {err_msg}")
+                        stream_state["last_error"] = err_msg
+                        await asyncio.sleep(5)
 
+            # بعد الانتهاء من جميع السور (ختمة كاملة)
             stream_state["completed_khatmas"] += 1
             stream_state["status"] = "اكتملت الختمة، جاري تحضير الختمة الجديدة..."
             await download_videos_from_drive(FOLDER_URL_1, "vid", clean_old_dir="vid3")
@@ -219,7 +259,6 @@ async def start_video_stream():
         stream_state["status"] = f"توقف بسبب خطأ: {e}"
         stream_state["is_streaming"] = False
         stream_state["last_error"] = str(e)
-
 
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
