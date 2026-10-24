@@ -3,6 +3,9 @@ import shutil
 import asyncio
 import logging
 import time
+import gdown
+import concurrent.futures
+
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
@@ -74,39 +77,48 @@ for i in range(1, 115):
 
 
 async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: str = None):
+    """
+    تحميل مجلد من Google Drive باستخدام gdown كمكتبة بايثون للحصول على استقرار تام
+    بدون مشاكل سطر الأوامر (subprocess).
+    """
     if not url:
         logger.warning(f"رابط المجلد الخاص بـ {output_dir} غير موجود!")
         return
 
+    # تنظيف المجلد القديم إن وجد لتوفير المساحة
     if clean_old_dir and os.path.exists(clean_old_dir):
         shutil.rmtree(clean_old_dir, ignore_errors=True)
+        logger.info(f"تم مسح المجلد القديم: {clean_old_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"بدأ تحميل الفيديوهات إلى المجلد: {output_dir} ...")
 
-    # استخدام وضع --folder الأساسي مع تحديد مسار الإخراج بدقة وتمرير الرابط كنص محمي
-    process = await asyncio.create_subprocess_exec(
-        "gdown", "--folder", url, "-O", output_dir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await process.communicate()
+    # دالة فرعية متزامنة تقوم بالتحميل
+    def _download():
+        try:
+            # استخدام مكتبة gdown مباشرة للتعامل مع المجلد
+            # remaining_ok=True يسمح بمتابعة التحميل إذا توقف
+            res = gdown.download_folder(
+                url=url,
+                output=output_dir,
+                quiet=False,
+                use_cookies=False,
+                remaining_ok=True
+            )
+            return True, res
+        except Exception as e:
+            return False, str(e)
 
-    if process.returncode == 0:
+    # تشغيل التحميل في مسار منفصل (Thread) لكي لا يتجمد خادم FastAPI والبث المباشر
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        success, result = await loop.run_in_executor(pool, _download)
+
+    if success:
         logger.info(f"اكتمل تحميل المجلد {output_dir} بنجاح.")
     else:
-        # طباعة الخطأ الفعلي لتشخيصه إن حدث
-        error_message = stderr.decode(errors='ignore').strip()
-        logger.warning(f"فشل gdown للمجلد {output_dir}. رسالة الخطأ: {error_message}")
-        
-        # محاولة احتياطية (Fallback) باستخدام gdown كأمر shell إذا فشل create_subprocess_exec
-        logger.info(f"محاولة تحميل بديلة للمجلد {output_dir}...")
-        fallback_process = await asyncio.create_subprocess_shell(
-            f'gdown --folder "{url}" -O "{output_dir}"',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await fallback_process.communicate()
+        logger.error(f"فشل تحميل المجلد {output_dir}. رسالة الخطأ: {result}")
+
 
 async def get_video_duration(filename: str) -> float:
     try:
