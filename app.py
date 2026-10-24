@@ -3,7 +3,7 @@ import shutil
 import asyncio
 import logging
 import time
-import gdown
+import yt_dlp
 import concurrent.futures
 
 from datetime import datetime, timezone
@@ -78,44 +78,44 @@ for i in range(1, 115):
 
 async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: str = None):
     """
-    تحميل مجلد من Google Drive باستخدام gdown كمكتبة بايثون للحصول على استقرار تام.
+    تحميل مجلد من Google Drive باستخدام yt-dlp لتجاوز مشاكل الأذونات وحدود التحميل.
     """
     if not url:
         logger.warning(f"رابط المجلد الخاص بـ {output_dir} غير موجود!")
         return
 
-    # تنظيف المجلد القديم إن وجد لتوفير المساحة
     if clean_old_dir and os.path.exists(clean_old_dir):
         shutil.rmtree(clean_old_dir, ignore_errors=True)
         logger.info(f"تم مسح المجلد القديم: {clean_old_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"بدأ تحميل الفيديوهات إلى المجلد: {output_dir} ...")
+    logger.info(f"بدأ تحميل الفيديوهات عبر yt-dlp إلى المجلد: {output_dir} ...")
 
-    # دالة فرعية متزامنة تقوم بالتحميل
     def _download():
+        # إعدادات yt-dlp
+        ydl_opts = {
+            # تنسيق اسم الملف: يحافظ على الاسم الأصلي للملف في جوجل درايف
+            'outtmpl': f'{output_dir}/%(title)s.%(ext)s', 
+            'quiet': False,
+            'no_warnings': True,
+            # تخطي الملفات الموجودة مسبقاً لتوفير الوقت
+            'ignoreerrors': True, 
+        }
         try:
-            # استخدام مكتبة gdown بدون remaining_ok
-            res = gdown.download_folder(
-                url=url,
-                output=output_dir,
-                quiet=False,
-                use_cookies=False
-            )
-            return True, res
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            return True, "تم"
         except Exception as e:
             return False, str(e)
 
-    # تشغيل التحميل في مسار منفصل (Thread) لكي لا يتجمد خادم FastAPI
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
         success, result = await loop.run_in_executor(pool, _download)
 
     if success:
-        logger.info(f"اكتمل تحميل المجلد {output_dir} بنجاح.")
+        logger.info(f"اكتملت محاولة التحميل للمجلد {output_dir}.")
     else:
-        logger.error(f"فشل تحميل المجلد {output_dir}. رسالة الخطأ: {result}")
-
+        logger.error(f"فشل التحميل عبر yt-dlp للمجلد {output_dir}. رسالة الخطأ: {result}")
 async def get_video_duration(filename: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
