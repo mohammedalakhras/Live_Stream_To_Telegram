@@ -84,18 +84,29 @@ async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: s
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"بدأ تحميل الفيديوهات إلى المجلد: {output_dir} ...")
 
+    # استخدام وضع --folder الأساسي مع تحديد مسار الإخراج بدقة وتمرير الرابط كنص محمي
     process = await asyncio.create_subprocess_exec(
-        "gdown", "--folder", url, "-O", output_dir, "--remaining-ok",
+        "gdown", "--folder", url, "-O", output_dir,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await process.communicate()
+    stdout, stderr = await process.communicate()
 
     if process.returncode == 0:
         logger.info(f"اكتمل تحميل المجلد {output_dir} بنجاح.")
     else:
-        logger.warning(f"ملاحظات gdown للمجلد {output_dir}: {stderr.decode(errors='ignore')[:300]}")
-
+        # طباعة الخطأ الفعلي لتشخيصه إن حدث
+        error_message = stderr.decode(errors='ignore').strip()
+        logger.warning(f"فشل gdown للمجلد {output_dir}. رسالة الخطأ: {error_message}")
+        
+        # محاولة احتياطية (Fallback) باستخدام gdown كأمر shell إذا فشل create_subprocess_exec
+        logger.info(f"محاولة تحميل بديلة للمجلد {output_dir}...")
+        fallback_process = await asyncio.create_subprocess_shell(
+            f'gdown --folder "{url}" -O "{output_dir}"',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await fallback_process.communicate()
 
 async def get_video_duration(filename: str) -> float:
     try:
