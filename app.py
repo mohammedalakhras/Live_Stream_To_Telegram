@@ -12,8 +12,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-import aiohttp
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, JSONResponse
 from pyrogram import Client
 from pytgcalls import PyTgCalls
@@ -27,7 +26,6 @@ logger = logging.getLogger("QuranStreamer")
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-# تم استبدال SESSION_URL بـ SESSION_STRING
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@MohammedAlakhras")
 
@@ -36,6 +34,9 @@ FOLDER_URL_2 = os.getenv("FOLDER_URL_2", "")
 FOLDER_URL_3 = os.getenv("FOLDER_URL_3", "")
 
 PORT = int(os.getenv("PORT", "10000"))
+
+# كلمة مرور المشرف للوحة التحكم (افتراضية إذا لم يتم تحديدها في متغيرات البيئة)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456")
 
 SURAH_NAMES = [
     "الفاتحة", "البقرة", "آل عمران", "النساء", "المائدة", "الأنعام", "الأعراف", "الأنفال", "التوبة", "يونس",
@@ -66,6 +67,9 @@ stream_state = {
     "last_ping_time": "لم يتم استقبال طلبات بعد",
     "ping_count": 0,
     "last_error": None,
+    "force_skip": False, # مؤشر لتخطي السورة الحالية
+    "target_surah_index": None, # مؤشر للقفز إلى سورة معينة
+    "is_paused": False # مؤشر لإيقاف البث مؤقتاً
 }
 
 video_files = []
@@ -78,15 +82,10 @@ for i in range(1, 115):
     else:
         video_files.append((i, f"vid3/{file_name}"))
 
-# قراءة مفتاح JSON من متغيرات البيئة بدلاً من رفع الملف لحمايته
 GDRIVE_CREDENTIALS_JSON = os.getenv("GDRIVE_CREDENTIALS_JSON", "")
+pytgcalls_app = None # للوصول إلى المحرك لإيقافه/استئنافه من لوحة التحكم
 
 async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_dir: str = None):
-    """
-    تحميل ملفات من Google Drive باستخدام واجهة Google الرسمية (API)
-    لضمان السرعة القصوى وعدم التعرض للحظر (Rate Limits).
-    ملاحظة: المتغير الأول هنا هو Folder ID وليس الرابط الكامل.
-    """
     if not folder_id:
         logger.warning(f"معرف المجلد الخاص بـ {output_dir} غير موجود!")
         return
@@ -100,6 +99,7 @@ async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_
 
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"بدأ تحميل الفيديوهات عبر Google API إلى {output_dir} ...")
+    stream_state["status"] = f"جاري تحميل ملفات {output_dir}..."
 
     def _download():
         try:
@@ -110,7 +110,6 @@ async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_
             )
             service = build('drive', 'v3', credentials=creds)
 
-            # البحث عن جميع الملفات داخل المجلد (mp4 فقط)
             query = f"'{folder_id}' in parents and mimeType='video/mp4' and trashed=false"
             results = service.files().list(
                 q=query, pageSize=200, fields="nextPageToken, files(id, name)",
@@ -127,7 +126,7 @@ async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_
                 file_name = item['name']
                 file_path = os.path.join(output_dir, file_name)
 
-                if os.path.exists(file_path):
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                     continue
 
                 request = service.files().get_media(fileId=file_id)
@@ -161,7 +160,6 @@ async def get_video_duration(filename: str) -> float:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        # مهلة 10 ثوانٍ لمنع التعليق المستمر
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
         duration_str = stdout.decode().strip()
         if duration_str:
@@ -172,16 +170,16 @@ async def get_video_duration(filename: str) -> float:
     except Exception as e:
         logger.error(f"خطأ أثناء حساب مدة {filename}: {e}")
 
-    # إرجاع 0.0 يشير إلى أن الملف معطوب ويجب إعادة تحميله
     return 0.0
 
 async def start_video_stream():
+    global pytgcalls_app
     prefetch_task = None
     try:
-        stream_state["status"] = "جاري تحميل الدفعة الأولى من الفيديوهات..."
+        stream_state["status"] = "جاري تحميل الدفعة الأولى..."
         await download_videos_from_drive(FOLDER_URL_1, "vid")
 
-        stream_state["status"] = "جاري الاتصال بتيلغرام وتشغيل PyTgCalls..."
+        stream_state["status"] = "جاري الاتصال بتيلغرام..."
         
         app = Client(
             "my_acc",
@@ -190,6 +188,7 @@ async def start_video_stream():
             api_hash=API_HASH,
         )
         pytgcalls = PyTgCalls(app)
+        pytgcalls_app = pytgcalls
 
         await app.start()
         await pytgcalls.start()
@@ -198,50 +197,61 @@ async def start_video_stream():
         logger.info(f"تم الاتصال بالقناة بنجاح: {chat.title} ({chat.id})")
 
         while True:
-            for surah_num, video_path in video_files:
+            # استخدام متغير للتحكم في فهرس الحلقة حتى نتمكن من القفز لسورة معينة
+            i = 0
+            while i < len(video_files):
+                
+                # إذا طلب المشرف إيقاف البث مؤقتاً
+                while stream_state["is_paused"]:
+                    stream_state["status"] = "البث متوقف مؤقتاً ⏸️"
+                    await asyncio.sleep(2)
+                    continue
+
+                # إذا طلب المشرف القفز إلى سورة معينة
+                if stream_state["target_surah_index"] is not None:
+                    i = stream_state["target_surah_index"] - 1
+                    stream_state["target_surah_index"] = None # إعادة ضبط المؤشر
+
+                surah_num, video_path = video_files[i]
                 surah_name = SURAH_NAMES[surah_num - 1]
                 next_surah_name = SURAH_NAMES[surah_num % 114]
 
-                # التحميل المسبق للدفعات (Prefetch)
+                # إعادة ضبط مؤشر التخطي
+                stream_state["force_skip"] = False
+
+                # التحميل المسبق
                 if surah_num == 45:
-                    prefetch_task = asyncio.create_task(
-                        download_videos_from_drive(FOLDER_URL_2, "vid2")
-                    )
+                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2"))
                 elif surah_num == 51 and prefetch_task:
                     await prefetch_task
                     shutil.rmtree("vid", ignore_errors=True)
                 elif surah_num == 90:
-                    prefetch_task = asyncio.create_task(
-                        download_videos_from_drive(FOLDER_URL_3, "vid3")
-                    )
+                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3"))
                 elif surah_num == 101 and prefetch_task:
                     await prefetch_task
                     shutil.rmtree("vid2", ignore_errors=True)
 
-                # حلقة لا نهائية فرعية لضمان عدم تخطي السورة الحالية
                 is_played = False
                 retry_count = 0
                 
-                while not is_played:
-                    # 1. التحقق من وجود الملف
+                while not is_played and not stream_state["force_skip"] and stream_state["target_surah_index"] is None:
+                    if stream_state["is_paused"]:
+                        break # الخروج من حلقة المحاولة إذا تم الإيقاف
+
                     if not os.path.exists(video_path):
                         logger.warning(f"الملف {video_path} غير موجود. جاري إعادة التحميل...")
                         duration = 0.0
                     else:
-                        # 2. حساب المدة (ترجع 0.0 إذا كان الملف معطوباً)
                         duration = await get_video_duration(video_path)
 
-                    # 3. معالجة الملف المعطوب أو المفقود
                     if duration == 0.0:
                         retry_count += 1
                         logger.error(f"الملف {video_path} معطوب أو مفقود. المحاولة رقم {retry_count}")
-                        stream_state["status"] = f"إعادة تحميل السورة الحالية ({retry_count})..."
+                        stream_state["status"] = f"إعادة تحميل {surah_name} ({retry_count})..."
                         
-                        # حذف النسخة التالفة
                         if os.path.exists(video_path):
                             os.remove(video_path)
                             
-                        # إعادة تحميل الدفعة الصحيحة بناءً على رقم السورة
                         if 1 <= surah_num <= 50:
                             await download_videos_from_drive(FOLDER_URL_1, "vid")
                         elif 51 <= surah_num <= 100:
@@ -250,9 +260,8 @@ async def start_video_stream():
                             await download_videos_from_drive(FOLDER_URL_3, "vid3")
                             
                         await asyncio.sleep(5)
-                        continue  # إعادة فحص الملف في الدورة القادمة للحلقة while
+                        continue
 
-                    # 4. بث السورة السليمة
                     try:
                         stream_state.update({
                             "status": "يبث مباشرة الآن 🟢",
@@ -266,17 +275,30 @@ async def start_video_stream():
                             "last_error": None,
                         })
 
-                        # مهلة 30 ثانية لتجنب تعليق الاتصال بخوادم تيلغرام
                         await asyncio.wait_for(
                             pytgcalls.play(chat.id, MediaStream(video_path)),
                             timeout=30.0
                         )
                         logger.info(f"بدأ بث: سورة {surah_name} ({video_path}) - المدة: {duration:.1f} ثانية")
 
-                        # الانتظار حتى تنتهي السورة تماماً
-                        await asyncio.sleep(duration + 2)
+                        # حلقة مراقبة ذكية للانتظار مع الاستجابة لأوامر المشرف
+                        elapsed_wait = 0
+                        while elapsed_wait < (duration + 2):
+                            if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
+                                logger.info(f"تم أمر التخطي للسورة {surah_name}")
+                                break
+                            if stream_state["is_paused"]:
+                                await pytgcalls.pause_stream(chat.id)
+                                stream_state["status"] = "البث متوقف مؤقتاً ⏸️"
+                                while stream_state["is_paused"]:
+                                    await asyncio.sleep(1)
+                                await pytgcalls.resume_stream(chat.id)
+                                stream_state["status"] = "يبث مباشرة الآن 🟢"
+                                stream_state["started_at_ts"] = time.time() - elapsed_wait # تعديل وقت البدء ليستمر شريط التقدم من حيث توقف
+                                
+                            await asyncio.sleep(1)
+                            elapsed_wait += 1
                         
-                        # نجاح العملية يكسر حلقة إعادة المحاولة
                         is_played = True
 
                     except asyncio.TimeoutError:
@@ -289,8 +311,11 @@ async def start_video_stream():
                         logger.error(f"حدث خطأ أثناء بث {video_path}: {err_msg}")
                         stream_state["last_error"] = err_msg
                         await asyncio.sleep(5)
+                
+                # التقدم للسورة التالية فقط إذا لم يتم القفز
+                if stream_state["target_surah_index"] is None:
+                    i += 1
 
-            # بعد الانتهاء من جميع السور (ختمة كاملة)
             stream_state["completed_khatmas"] += 1
             stream_state["status"] = "اكتملت الختمة، جاري تحضير الختمة الجديدة..."
             await download_videos_from_drive(FOLDER_URL_1, "vid", clean_old_dir="vid3")
@@ -309,7 +334,6 @@ async def lifespan(app_instance: FastAPI):
     yield
     stream_task.cancel()
 
-
 web_app = FastAPI(title="لوحة البث المباشر للقرآن الكريم", lifespan=lifespan)
 
 def format_seconds(seconds: float) -> str:
@@ -324,12 +348,7 @@ def format_seconds(seconds: float) -> str:
 async def ping():
     stream_state["ping_count"] += 1
     stream_state["last_ping_time"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    return JSONResponse({
-        "ok": True,
-        "status": stream_state["status"],
-        "current_surah": stream_state["current_surah_name"],
-        "ping_count": stream_state["ping_count"],
-    })
+    return JSONResponse({"ok": True})
 
 @web_app.get("/api/status")
 async def api_status():
@@ -338,12 +357,18 @@ async def api_status():
     remaining = 0.0
     progress_pct = 0.0
 
-    if stream_state["is_streaming"] and stream_state["duration_seconds"] > 0:
+    if stream_state["is_streaming"] and stream_state["duration_seconds"] > 0 and not stream_state["is_paused"]:
         elapsed = min(now - stream_state["started_at_ts"], stream_state["duration_seconds"])
         remaining = max(stream_state["duration_seconds"] - elapsed, 0.0)
         progress_pct = round((elapsed / stream_state["duration_seconds"]) * 100, 1)
 
     uptime_sec = now - stream_state["server_start_ts"]
+    
+    # فحص الملفات المحملة
+    downloaded_files = []
+    for num, path in video_files:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            downloaded_files.append(num)
 
     return {
         **stream_state,
@@ -353,7 +378,37 @@ async def api_status():
         "duration_formatted": format_seconds(stream_state["duration_seconds"]),
         "progress_pct": progress_pct,
         "uptime_formatted": format_seconds(uptime_sec),
+        "downloaded_files_count": len(downloaded_files),
+        "surah_names": SURAH_NAMES # نرسلها لبناء القائمة المنسدلة
     }
+
+# --- نقاط التحكم (Admin Endpoints) ---
+
+def verify_admin(password: str):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="كلمة المرور غير صحيحة")
+
+@web_app.post("/api/skip")
+async def api_skip(password: str = Header(...)):
+    verify_admin(password)
+    stream_state["force_skip"] = True
+    return {"message": "تم إرسال أمر تخطي السورة الحالية"}
+
+@web_app.post("/api/pause")
+async def api_pause(password: str = Header(...)):
+    verify_admin(password)
+    stream_state["is_paused"] = not stream_state["is_paused"] # تبديل الحالة
+    status_msg = "تم إيقاف البث" if stream_state["is_paused"] else "تم استئناف البث"
+    return {"message": status_msg}
+
+@web_app.post("/api/jump/{surah_index}")
+async def api_jump(surah_index: int, password: str = Header(...)):
+    verify_admin(password)
+    if 1 <= surah_index <= 114:
+        stream_state["target_surah_index"] = surah_index
+        return {"message": f"جاري الانتقال إلى سورة {SURAH_NAMES[surah_index - 1]}"}
+    raise HTTPException(status_code=400, detail="رقم السورة غير صحيح")
+
 
 @web_app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -363,34 +418,58 @@ async def dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>لوحة البث المباشر للقرآن الكريم</title>
+        <title>لوحة البث المباشر التفاعلية</title>
         <style>
-            :root { --bg: #0f172a; --card: #1e293b; --accent: #10b981; --text: #f8fafc; --muted: #94a3b8; }
+            :root { --bg: #0f172a; --card: #1e293b; --accent: #10b981; --accent-hover: #059669; --text: #f8fafc; --muted: #94a3b8; --danger: #ef4444; --warning: #f59e0b; }
             * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
-            body { margin: 0; padding: 24px; background-color: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-            .container { width: 100%; max-width: 720px; background: var(--card); border-radius: 16px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08); }
+            body { margin: 0; padding: 24px; background-color: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; }
+            .container { width: 100%; max-width: 850px; background: var(--card); border-radius: 16px; padding: 28px; box-shadow: 0 20px 40px rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.08); }
             .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 16px; margin-bottom: 24px; }
             .title { font-size: 1.4rem; font-weight: 700; margin: 0; }
-            .badge { background: rgba(16, 185, 129, 0.15); color: var(--accent); padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 0.9rem; }
-            .surah-box { text-align: center; background: rgba(15, 23, 42, 0.6); padding: 24px; border-radius: 12px; margin-bottom: 20px; }
+            .badge { background: rgba(16, 185, 129, 0.15); color: var(--accent); padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 0.9rem; transition: all 0.3s;}
+            .badge.paused { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+            
+            /* مربع البث الرئيسي */
+            .surah-box { text-align: center; background: rgba(15, 23, 42, 0.6); padding: 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); }
             .surah-label { color: var(--muted); font-size: 0.95rem; margin-bottom: 8px; }
             .surah-name { font-size: 2.2rem; font-weight: 800; color: var(--accent); margin: 4px 0 16px; }
             .progress-bar { width: 100%; height: 10px; background: #334155; border-radius: 999px; overflow: hidden; margin-bottom: 10px; }
-            .progress-fill { height: 100%; background: linear-gradient(90deg, #059669, #10b981); width: 0%; transition: width 0.5s ease; }
+            .progress-fill { height: 100%; background: linear-gradient(90deg, #059669, #10b981); width: 0%; transition: width 0.5s linear; }
             .time-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.9rem; }
-            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 20px; }
+            
+            /* لوحة التحكم الإدارية */
+            .control-panel { background: rgba(15, 23, 42, 0.8); padding: 20px; border-radius: 12px; margin-bottom: 20px; border: 1px dashed rgba(255,255,255,0.2); }
+            .control-title { font-size: 1.1rem; font-weight: 600; margin-top: 0; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; color: #e2e8f0; }
+            .control-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 15px; }
+            input[type="password"] { background: #334155; border: 1px solid #475569; color: white; padding: 10px 14px; border-radius: 8px; outline: none; width: 180px; }
+            input[type="password"]:focus { border-color: var(--accent); }
+            select { background: #334155; border: 1px solid #475569; color: white; padding: 10px 14px; border-radius: 8px; outline: none; flex-grow: 1; cursor: pointer; }
+            
+            button { padding: 10px 18px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
+            .btn-primary { background: var(--accent); color: white; }
+            .btn-primary:hover { background: var(--accent-hover); }
+            .btn-danger { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4); }
+            .btn-danger:hover { background: rgba(239, 68, 68, 0.4); }
+            .btn-warning { background: rgba(245, 158, 11, 0.2); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.4); }
+            .btn-warning:hover { background: rgba(245, 158, 11, 0.4); }
+            
+            /* الإحصائيات */
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
             .stat-card { background: rgba(15, 23, 42, 0.45); padding: 14px 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); }
             .stat-label { color: var(--muted); font-size: 0.85rem; margin-bottom: 6px; }
             .stat-value { font-size: 1.05rem; font-weight: 700; }
-            .error-box { margin-top: 16px; padding: 12px; border-radius: 8px; background: rgba(239, 68, 68, 0.15); color: #fca5a5; display: none; font-size: 0.9rem; }
+            
+            .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 12px 24px; border-radius: 8px; box-shadow: 0 10px 15px rgba(0,0,0,0.3); border: 1px solid #475569; display: none; z-index: 1000; font-weight: 600;}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1 class="title">📡 لوحة البث القرآني المباشر</h1>
+                <h1 class="title">📡 لوحة البث المباشر للقرآن الكريم</h1>
                 <span class="badge" id="status-badge">جاري التحميل...</span>
             </div>
+            
+            <!-- مربع العرض الأساسي -->
             <div class="surah-box">
                 <div class="surah-label">السورة التي تُبث الآن (<span id="surah-num">0</span> / 114)</div>
                 <div class="surah-name" id="surah-name">...</div>
@@ -401,45 +480,128 @@ async def dashboard():
                     <span>المتبقي: <strong id="remaining">00:00</strong></span>
                 </div>
             </div>
+
+            <!-- لوحة التحكم الإدارية (تفاعلية) -->
+            <div class="control-panel">
+                <h3 class="control-title">⚙️ أدوات التحكم بالبث</h3>
+                <div class="control-row">
+                    <input type="password" id="admin-pass" placeholder="كلمة مرور المشرف..." required>
+                    <button class="btn-warning" onclick="togglePause()" id="pause-btn">⏸ إيقاف مؤقت</button>
+                    <button class="btn-danger" onclick="skipSurah()">⏭ تخطي السورة</button>
+                </div>
+                <div class="control-row">
+                    <select id="surah-selector">
+                        <option value="" disabled selected>-- اختر سورة للقفز إليها وبثها الآن --</option>
+                        <!-- سيتم تعبئة الخيارات برمجياً -->
+                    </select>
+                    <button class="btn-primary" onclick="jumpToSurah()">🚀 تشغيل فوراً</button>
+                </div>
+            </div>
+
+            <!-- الإحصائيات -->
             <div class="grid">
-                <div class="stat-card"><div class="stat-label">السورة القادمة</div><div class="stat-value" id="next-surah">-</div></div>
+                <div class="stat-card"><div class="stat-label">الملفات الجاهزة محلياً</div><div class="stat-value"><span id="downloaded-count">0</span> / 114 ملف</div></div>
                 <div class="stat-card"><div class="stat-label">القناة المستهدفة</div><div class="stat-value" id="channel-id">-</div></div>
                 <div class="stat-card"><div class="stat-label">عدد الختمات المكتملة</div><div class="stat-value" id="khatmas">0</div></div>
                 <div class="stat-card"><div class="stat-label">مدة تشغيل السيرفر</div><div class="stat-value" id="uptime">00:00</div></div>
-                <div class="stat-card"><div class="stat-label">طلبات منع الخمول (Pings)</div><div class="stat-value" id="pings">0</div></div>
-                <div class="stat-card"><div class="stat-label">آخر طلب منع خمول</div><div class="stat-value" id="last-ping" style="font-size:0.85rem;">-</div></div>
             </div>
-            <div class="error-box" id="error-box"></div>
         </div>
+
+        <!-- رسائل التنبيه العائمة -->
+        <div id="toast" class="toast"></div>
+
         <script>
+            let isPaused = false;
+            let surahsLoaded = false;
+
+            // دالة لعرض الإشعارات المنبثقة
+            function showToast(message, isError = false) {
+                const toast = document.getElementById('toast');
+                toast.textContent = message;
+                toast.style.backgroundColor = isError ? '#ef4444' : '#10b981';
+                toast.style.display = 'block';
+                setTimeout(() => toast.style.display = 'none', 4000);
+            }
+
+            // إرسال طلب تحكم
+            async function sendCommand(endpoint, method = 'POST') {
+                const pass = document.getElementById('admin-pass').value;
+                if (!pass) {
+                    showToast('يرجى إدخال كلمة المرور أولاً!', true);
+                    return;
+                }
+                try {
+                    const res = await fetch(endpoint, {
+                        method: method,
+                        headers: { 'password': pass }
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        showToast(data.message);
+                        fetchStatus(); // تحديث فوري
+                    } else {
+                        showToast(data.detail || 'خطأ في العملية', true);
+                    }
+                } catch (e) {
+                    showToast('فشل الاتصال بالخادم', true);
+                }
+            }
+
+            // وظائف الأزرار
+            function skipSurah() { sendCommand('/api/skip'); }
+            function togglePause() { sendCommand('/api/pause'); }
+            function jumpToSurah() {
+                const selector = document.getElementById('surah-selector');
+                const idx = selector.value;
+                if (!idx) { showToast('يرجى اختيار سورة من القائمة', true); return; }
+                sendCommand(`/api/jump/${idx}`);
+            }
+
+            // التحديث التلقائي لحالة البث
             async function fetchStatus() {
                 try {
                     const res = await fetch('/api/status');
                     const data = await res.json();
-                    document.getElementById('status-badge').textContent = data.status;
+                    
+                    const badge = document.getElementById('status-badge');
+                    badge.textContent = data.status;
+                    if(data.is_paused) {
+                        badge.classList.add('paused');
+                        document.getElementById('pause-btn').textContent = '▶ استئناف البث';
+                        isPaused = true;
+                    } else {
+                        badge.classList.remove('paused');
+                        document.getElementById('pause-btn').textContent = '⏸ إيقاف مؤقت';
+                        isPaused = false;
+                    }
+
                     document.getElementById('surah-num').textContent = data.current_surah_index;
                     document.getElementById('surah-name').textContent = data.current_surah_name;
-                    document.getElementById('next-surah').textContent = data.next_surah_name;
                     document.getElementById('channel-id').textContent = data.channel_id;
                     document.getElementById('khatmas').textContent = data.completed_khatmas;
                     document.getElementById('uptime').textContent = data.uptime_formatted;
                     document.getElementById('elapsed').textContent = data.elapsed_formatted;
                     document.getElementById('duration').textContent = data.duration_formatted;
                     document.getElementById('remaining').textContent = data.remaining_formatted;
+                    document.getElementById('downloaded-count').textContent = data.downloaded_files_count;
                     document.getElementById('progress-fill').style.width = data.progress_pct + '%';
-                    document.getElementById('pings').textContent = data.ping_count;
-                    document.getElementById('last-ping').textContent = data.last_ping_time;
-                    const errBox = document.getElementById('error-box');
-                    if (data.last_error) {
-                        errBox.style.display = 'block';
-                        errBox.textContent = 'تنبيه آخر خطأ مسجل: ' + data.last_error;
-                    } else {
-                        errBox.style.display = 'none';
+
+                    // تعبئة قائمة السور مرة واحدة فقط
+                    if (!surahsLoaded && data.surah_names) {
+                        const selector = document.getElementById('surah-selector');
+                        data.surah_names.forEach((name, index) => {
+                            const opt = document.createElement('option');
+                            opt.value = index + 1;
+                            opt.textContent = `${index + 1}. سورة ${name}`;
+                            selector.appendChild(opt);
+                        });
+                        surahsLoaded = true;
                     }
                 } catch (e) {}
             }
+            
             fetchStatus();
-            setInterval(fetchStatus, 2000);
+            setInterval(fetchStatus, 2000); // تحديث كل ثانيتين
         </script>
     </body>
     </html>
