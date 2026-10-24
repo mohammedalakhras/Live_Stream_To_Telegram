@@ -78,8 +78,7 @@ for i in range(1, 115):
 
 async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: str = None):
     """
-    تحميل مجلد من Google Drive باستخدام gdown كمكتبة بايثون للحصول على استقرار تام
-    بدون مشاكل سطر الأوامر (subprocess).
+    تحميل مجلد من Google Drive باستخدام gdown كمكتبة بايثون للحصول على استقرار تام.
     """
     if not url:
         logger.warning(f"رابط المجلد الخاص بـ {output_dir} غير موجود!")
@@ -96,20 +95,18 @@ async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: s
     # دالة فرعية متزامنة تقوم بالتحميل
     def _download():
         try:
-            # استخدام مكتبة gdown مباشرة للتعامل مع المجلد
-            # remaining_ok=True يسمح بمتابعة التحميل إذا توقف
+            # استخدام مكتبة gdown بدون remaining_ok
             res = gdown.download_folder(
                 url=url,
                 output=output_dir,
                 quiet=False,
-                use_cookies=False,
-                remaining_ok=True
+                use_cookies=False
             )
             return True, res
         except Exception as e:
             return False, str(e)
 
-    # تشغيل التحميل في مسار منفصل (Thread) لكي لا يتجمد خادم FastAPI والبث المباشر
+    # تشغيل التحميل في مسار منفصل (Thread) لكي لا يتجمد خادم FastAPI
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
         success, result = await loop.run_in_executor(pool, _download)
@@ -118,7 +115,6 @@ async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: s
         logger.info(f"اكتمل تحميل المجلد {output_dir} بنجاح.")
     else:
         logger.error(f"فشل تحميل المجلد {output_dir}. رسالة الخطأ: {result}")
-
 
 async def get_video_duration(filename: str) -> float:
     try:
