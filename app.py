@@ -8,22 +8,30 @@ import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, JSONResponse
+from pyrogram import Client, raw
+from pyrogram.handlers import RawUpdateHandler
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-logger = logging.getLogger("QuranStreamer-RTMP")
+logger = logging.getLogger("QuranStreamer-Tracker")
 
-# متغيرات البيئة الجديدة للـ RTMP
+# متغيرات البيئة
 RTMP_URL = os.getenv("RTMP_URL", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "قناتك")
+LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", "-1002489301499"))
+
+# يجب توفرها إما لحساب شخصي (SESSION) أو بوت (BOT_TOKEN)
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
+
 FOLDER_URL_1 = os.getenv("FOLDER_URL_1", "")
 FOLDER_URL_2 = os.getenv("FOLDER_URL_2", "")
 FOLDER_URL_3 = os.getenv("FOLDER_URL_3", "")
@@ -31,134 +39,145 @@ GDRIVE_CREDENTIALS_JSON = os.getenv("GDRIVE_CREDENTIALS_JSON", "")
 PORT = int(os.getenv("PORT", "10000"))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123456")
 
-SURAH_NAMES = [
-    "الفاتحة", "البقرة", "آل عمران", "النساء", "المائدة", "الأنعام", "الأعراف", "الأنفال", "التوبة", "يونس",
-    "هود", "يوسف", "الرعد", "إبراهيم", "الحجر", "النحل", "الإسراء", "الكهف", "مريم", "طه",
-    "الأنبياء", "الحج", "المؤمنون", "النور", "الفرقان", "الشعراء", "النمل", "القصص", "العنكبوت", "الروم",
-    "لقمان", "السجدة", "الأحزاب", "سبأ", "فاطر", "يس", "الصافات", "ص", "الزمر", "غافر",
-    "فصلت", "الشورى", "الزخرف", "الدخان", "الجاثية", "الأحقاف", "محمد", "الفتح", "الحجرات", "ق",
-    "الذاريات", "الطور", "النجم", "القمر", "الرحمن", "الواقعة", "الحديد", "المجادلة", "الحشر", "الممتحنة",
-    "الصف", "الجمعة", "المنافقون", "التغابن", "الطلاق", "التحريم", "الملك", "القلم", "الحاقة", "المعارج",
-    "نوح", "الجن", "المزمل", "المدثر", "القيامة", "الإنسان", "المرسلات", "النبأ", "النازعات", "عبس",
-    "التكوير", "الانفطار", "المطففين", "الانشقاق", "البروج", "الطارق", "الأعلى", "الغاشية", "الفجر", "البلد",
-    "الشمس", "الليل", "الضحى", "الشرح", "التين", "العلق", "القدر", "البينة", "الزلزلة", "العاديات",
-    "القارعة", "التكاثر", "العصر", "الهمزة", "الفيل", "قريش", "الماعون", "الكوثر", "الكافرون", "النصر",
-    "المسد", "الإخلاص", "الفلق", "الناس"
-]
+SURAH_NAMES = ["الفاتحة", "البقرة", "آل عمران", "النساء", "المائدة", "الأنعام", "الأعراف", "الأنفال", "التوبة", "يونس", "هود", "يوسف", "الرعد", "إبراهيم", "الحجر", "النحل", "الإسراء", "الكهف", "مريم", "طه", "الأنبياء", "الحج", "المؤمنون", "النور", "الفرقان", "الشعراء", "النمل", "القصص", "العنكبوت", "الروم", "لقمان", "السجدة", "الأحزاب", "سبأ", "فاطر", "يس", "الصافات", "ص", "الزمر", "غافر", "فصلت", "الشورى", "الزخرف", "الدخان", "الجاثية", "الأحقاف", "محمد", "الفتح", "الحجرات", "ق", "الذاريات", "الطور", "النجم", "القمر", "الرحمن", "الواقعة", "الحديد", "المجادلة", "الحشر", "الممتحنة", "الصف", "الجمعة", "المنافقون", "التغابن", "الطلاق", "التحريم", "الملك", "القلم", "الحاقة", "المعارج", "نوح", "الجن", "المزمل", "المدثر", "القيامة", "الإنسان", "المرسلات", "النبأ", "النازعات", "عبس", "التكوير", "الانفطار", "المطففين", "الانشقاق", "البروج", "الطارق", "الأعلى", "الغاشية", "الفجر", "البلد", "الشمس", "الليل", "الضحى", "الشرح", "التين", "العلق", "القدر", "البينة", "الزلزلة", "العاديات", "القارعة", "التكاثر", "العصر", "الهمزة", "الفيل", "قريش", "الماعون", "الكوثر", "الكافرون", "النصر", "المسد", "الإخلاص", "الفلق", "الناس"]
 
 stream_state = {
-    "status": "جاري التهيئة...",
-    "is_streaming": False,
-    "current_surah_index": 0,
-    "current_surah_name": "لم يبدأ بعد",
-    "next_surah_name": "الفاتحة",
-    "current_file": "-",
-    "duration_seconds": 0.0,
-    "started_at_ts": 0.0,
-    "completed_khatmas": 0,
-    "server_start_ts": time.time(),
-    "last_ping_time": "لم يتم استقبال طلبات بعد",
-    "ping_count": 0,
-    "last_error": None,
-    "force_skip": False,
-    "target_surah_index": None
+    "status": "جاري التهيئة...", "is_streaming": False, "current_surah_index": 0,
+    "current_surah_name": "لم يبدأ بعد", "next_surah_name": "الفاتحة",
+    "duration_seconds": 0.0, "started_at_ts": 0.0, "completed_khatmas": 0,
+    "server_start_ts": time.time(), "ping_count": 0, "last_ping_time": "-",
+    "last_error": None, "force_skip": False, "target_surah_index": None
 }
 
 video_files = []
 for i in range(1, 115):
     file_name = f"{str(i).zfill(3)}.mp4"
-    if 1 <= i <= 50:
-        video_files.append((i, f"vid/{file_name}"))
-    elif 51 <= i <= 100:
-        video_files.append((i, f"vid2/{file_name}"))
-    else:
-        video_files.append((i, f"vid3/{file_name}"))
+    if 1 <= i <= 50: video_files.append((i, f"vid/{file_name}"))
+    elif 51 <= i <= 100: video_files.append((i, f"vid2/{file_name}"))
+    else: video_files.append((i, f"vid3/{file_name}"))
 
+# سجل الحضور: يخزن بيانات المستخدم ووقت الدخول
+attendance_log = {}
 
 async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_dir: str = None):
-    if not folder_id or not GDRIVE_CREDENTIALS_JSON:
-        logger.error("بيانات المجلد أو الـ JSON مفقودة.")
-        return
-
-    if clean_old_dir and os.path.exists(clean_old_dir):
-        shutil.rmtree(clean_old_dir, ignore_errors=True)
-
+    # نفس الدالة الناجحة للـ API...
+    if not folder_id or not GDRIVE_CREDENTIALS_JSON: return
+    if clean_old_dir and os.path.exists(clean_old_dir): shutil.rmtree(clean_old_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"بدأ تحميل الفيديوهات عبر Google API إلى {output_dir} ...")
-    stream_state["status"] = f"جاري تحميل ملفات {output_dir}..."
+    stream_state["status"] = f"جاري تحميل {output_dir}..."
 
     def _download():
         try:
             import json
             creds_dict = json.loads(GDRIVE_CREDENTIALS_JSON)
             creds = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
+                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly'])
             service = build('drive', 'v3', credentials=creds)
 
             query = f"'{folder_id}' in parents and mimeType='video/mp4' and trashed=false"
-            results = service.files().list(
-                q=query, pageSize=200, fields="nextPageToken, files(id, name)",
-                orderBy="name"
-            ).execute()
+            results = service.files().list(q=query, pageSize=200, fields="nextPageToken, files(id, name)", orderBy="name").execute()
             items = results.get('files', [])
 
-            if not items:
-                return False, "المجلد فارغ"
-
             for item in items:
-                file_id = item['id']
-                file_name = item['name']
-                file_path = os.path.join(output_dir, file_name)
-
-                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                    continue
-
-                request = service.files().get_media(fileId=file_id)
+                file_path = os.path.join(output_dir, item['name'])
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0: continue
+                request = service.files().get_media(fileId=item['id'])
                 fh = io.FileIO(file_path, mode='wb')
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
-                while not done:
-                    status, done = downloader.next_chunk()
-                    
+                while not done: _, done = downloader.next_chunk()
             return True, "نجاح"
-        except Exception as e:
-            return False, str(e)
+        except Exception as e: return False, str(e)
 
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        success, result = await loop.run_in_executor(pool, _download)
-
-    if success:
-        logger.info(f"اكتمل تحميل المجلد {output_dir}.")
-    else:
-        logger.error(f"خطأ تحميل API للمجلد {output_dir}: {result}")
-
+        await loop.run_in_executor(pool, _download)
 
 async def get_video_duration(filename: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", filename,
+            "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filename,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        duration_str = stdout.decode().strip()
-        if duration_str:
-            return float(duration_str)
-    except Exception as e:
-        logger.error(f"خطأ في حساب مدة {filename}: {e}")
-    return 0.0
+        return float(stdout.decode().strip()) if stdout.decode().strip() else 0.0
+    except: return 0.0
+
+# ----------------- مراقب أحداث تيلغرام (Attendance Tracker) -----------------
+async def raw_update_handler(client: Client, update, users, chats):
+    """
+    يستمع لأي تغيير في المشاركين داخل المحادثة المرئية للقناة.
+    """
+    if isinstance(update, raw.types.UpdateGroupCallParticipants):
+        for participant in update.participants:
+            peer = participant.peer
+            if not isinstance(peer, raw.types.PeerUser):
+                continue
+                
+            user_id = peer.user_id
+            current_time = time.time()
+            
+            # جلب معلومات المستخدم من القاموس الذي ترسله مكتبة Pyrogram
+            user_info = users.get(user_id)
+            if not user_info:
+                continue
+                
+            name = f"{user_info.first_name or ''} {user_info.last_name or ''}".strip()
+            username = f"@{user_info.username}" if getattr(user_info, 'username', None) else "بدون يوزر"
+
+            # إذا انضم المستخدم (Just Joined)
+            if participant.just_joined:
+                attendance_log[user_id] = {
+                    "join_time": current_time,
+                    "name": name,
+                    "username": username
+                }
+                logger.info(f"🟢 دخل البث: {name} ({username})")
+
+            # إذا غادر المستخدم (Left)
+            elif participant.left:
+                if user_id in attendance_log:
+                    join_time = attendance_log[user_id]["join_time"]
+                    duration_sec = current_time - join_time
+                    
+                    # تحويل الثواني إلى صيغة مقروءة (دقائق وثواني)
+                    mins, secs = divmod(int(duration_sec), 60)
+                    hrs, mins = divmod(mins, 60)
+                    duration_str = f"{hrs}س {mins}د {secs}ث" if hrs > 0 else f"{mins}د {secs}ث"
+                    
+                    # إرسال التقرير لقناة السجلات
+                    msg = (
+                        f"📊 **تقرير مغادرة مستمع**\n\n"
+                        f"👤 **الاسم:** `{name}`\n"
+                        f"🔹 **اليوزر:** {username}\n"
+                        f"🆔 **الآيدي:** `{user_id}`\n\n"
+                        f"⏱ **مدة الاستماع:** {duration_str}\n"
+                        f"📖 **غادر أثناء بث:** سورة {stream_state['current_surah_name']}"
+                    )
+                    
+                    try:
+                        await client.send_message(LOG_CHANNEL, msg)
+                    except Exception as e:
+                        logger.error(f"لم أتمكن من الإرسال لقناة السجلات: {e}")
+                    
+                    # إزالة المستخدم من السجل بعد المغادرة
+                    del attendance_log[user_id]
+                    logger.info(f"🔴 غادر البث: {name} - استمع لمدة {duration_str}")
 
 
 async def start_video_stream():
-    if not RTMP_URL:
-        logger.critical("متغير RTMP_URL غير موجود! لا يمكن بدء البث.")
+    if not RTMP_URL or not SESSION_STRING:
+        logger.critical("متغير RTMP_URL أو SESSION_STRING مفقود!")
         return
+
+    # تشغيل عميل تيلغرام لمراقبة الحضور
+    app = Client("attendance_bot", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
+    app.add_handler(RawUpdateHandler(raw_update_handler))
+    await app.start()
+    logger.info("✅ نظام تتبع الحضور يعمل الآن ويراقب القناة.")
 
     prefetch_task = None
     try:
-        stream_state["status"] = "جاري تحميل الدفعة الأولى..."
         await download_videos_from_drive(FOLDER_URL_1, "vid")
 
         while True:
@@ -170,112 +189,65 @@ async def start_video_stream():
 
                 surah_num, video_path = video_files[i]
                 surah_name = SURAH_NAMES[surah_num - 1]
-                next_surah_name = SURAH_NAMES[surah_num % 114]
                 stream_state["force_skip"] = False
 
-                # التحميل المسبق
-                if surah_num == 45:
-                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2"))
-                elif surah_num == 51 and prefetch_task:
-                    await prefetch_task
-                    shutil.rmtree("vid", ignore_errors=True)
-                elif surah_num == 90:
-                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3"))
-                elif surah_num == 101 and prefetch_task:
-                    await prefetch_task
-                    shutil.rmtree("vid2", ignore_errors=True)
+                if surah_num == 45: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2"))
+                elif surah_num == 51 and prefetch_task: await prefetch_task; shutil.rmtree("vid", ignore_errors=True)
+                elif surah_num == 90: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3"))
+                elif surah_num == 101 and prefetch_task: await prefetch_task; shutil.rmtree("vid2", ignore_errors=True)
 
                 is_played = False
-                retry_count = 0
-                
                 while not is_played and not stream_state["force_skip"] and stream_state["target_surah_index"] is None:
-                    if not os.path.exists(video_path):
-                        duration = 0.0
-                    else:
-                        duration = await get_video_duration(video_path)
-
+                    duration = await get_video_duration(video_path) if os.path.exists(video_path) else 0.0
+                    
                     if duration == 0.0:
-                        retry_count += 1
-                        logger.error(f"الملف {video_path} مفقود/معطوب. محاولة {retry_count}")
-                        stream_state["status"] = f"إعادة تحميل {surah_name} ({retry_count})..."
-                        
-                        if os.path.exists(video_path):
-                            os.remove(video_path)
-                            
-                        if 1 <= surah_num <= 50:
-                            await download_videos_from_drive(FOLDER_URL_1, "vid")
-                        elif 51 <= surah_num <= 100:
-                            await download_videos_from_drive(FOLDER_URL_2, "vid2")
-                        else:
-                            await download_videos_from_drive(FOLDER_URL_3, "vid3")
-                            
-                        await asyncio.sleep(5)
+                        stream_state["status"] = f"إعادة تحميل {surah_name}..."
+                        if os.path.exists(video_path): os.remove(video_path)
+                        if 1 <= surah_num <= 50: await download_videos_from_drive(FOLDER_URL_1, "vid")
+                        elif 51 <= surah_num <= 100: await download_videos_from_drive(FOLDER_URL_2, "vid2")
+                        else: await download_videos_from_drive(FOLDER_URL_3, "vid3")
                         continue
 
                     try:
                         stream_state.update({
-                            "status": "يبث مباشرة عبر RTMP 🟢",
-                            "is_streaming": True,
-                            "current_surah_index": surah_num,
-                            "current_surah_name": f"سورة {surah_name}",
-                            "next_surah_name": f"سورة {next_surah_name}",
-                            "current_file": video_path,
-                            "duration_seconds": round(duration, 1),
-                            "started_at_ts": time.time(),
-                            "last_error": None,
+                            "status": "يبث مباشرة 🟢", "is_streaming": True, "current_surah_index": surah_num,
+                            "current_surah_name": surah_name, "duration_seconds": round(duration, 1), "started_at_ts": time.time()
                         })
 
-                        # تشغيل البث عبر FFmpeg لدفع الفيديو إلى سيرفر تيلغرام مباشرة
+                        # تشغيل البث المباشر
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
-                            "ffmpeg", "-re", "-i", video_path,
-                            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+                            "ffmpeg", "-re", "-i", video_path, "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
                             "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
-                        logger.info(f"بدأ بث RTMP: سورة {surah_name}")
 
-                        # مراقبة العملية والاستجابة لأمر التخطي
                         while ffmpeg_proc.returncode is None:
                             if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
                                 ffmpeg_proc.terminate()
-                                logger.info(f"تم تخطي السورة {surah_name}")
                                 break
                             await asyncio.sleep(1)
 
                         is_played = True
-
                     except Exception as e:
-                        err_msg = str(e)
-                        logger.error(f"حدث خطأ أثناء بث {video_path}: {err_msg}")
-                        stream_state["last_error"] = err_msg
+                        logger.error(f"خطأ بث {video_path}: {e}")
                         await asyncio.sleep(5)
                 
-                if stream_state["target_surah_index"] is None:
-                    i += 1
+                if stream_state["target_surah_index"] is None: i += 1
 
             stream_state["completed_khatmas"] += 1
-            stream_state["status"] = "اكتملت الختمة، جاري التحضير..."
             await download_videos_from_drive(FOLDER_URL_1, "vid", clean_old_dir="vid3")
+    finally:
+        await app.stop()
 
-    except asyncio.CancelledError:
-        logger.info("تم إيقاف مهمة البث.")
-    except Exception as e:
-        logger.critical(f"خطأ حرج في البث: {e}")
-        stream_state["status"] = f"توقف بسبب خطأ: {e}"
-        stream_state["is_streaming"] = False
-        stream_state["last_error"] = str(e)
-
-
+# ----------------- باقي أكواد FastAPI (اللوحة) كما هي بالضبط -----------------
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     stream_task = asyncio.create_task(start_video_stream())
     yield
     stream_task.cancel()
 
-
-web_app = FastAPI(title="لوحة البث المباشر للقرآن الكريم (RTMP)", lifespan=lifespan)
-
+web_app = FastAPI(title="لوحة البث + نظام الحضور", lifespan=lifespan)
+# أضف هنا دوال /ping و /api/status و /api/skip واجهة HTML التي أنشأناها مسبقاً
 def format_seconds(seconds: float) -> str:
     seconds = max(0, int(seconds))
     hrs, rem = divmod(seconds, 3600)
