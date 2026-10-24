@@ -74,36 +74,66 @@ for i in range(1, 115):
     else:
         video_files.append((i, f"vid3/{file_name}"))
 
+# قراءة مفتاح JSON من متغيرات البيئة بدلاً من رفع الملف لحمايته
+GDRIVE_CREDENTIALS_JSON = os.getenv("GDRIVE_CREDENTIALS_JSON", "")
 
-async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: str = None):
+async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_dir: str = None):
     """
-    تحميل مجلد من Google Drive باستخدام yt-dlp لتجاوز مشاكل الأذونات وحدود التحميل.
+    تحميل ملفات من Google Drive باستخدام واجهة Google الرسمية (API)
+    لضمان السرعة القصوى وعدم التعرض للحظر (Rate Limits).
+    ملاحظة: المتغير الأول هنا هو Folder ID وليس الرابط الكامل.
     """
-    if not url:
-        logger.warning(f"رابط المجلد الخاص بـ {output_dir} غير موجود!")
+    if not folder_id:
+        logger.warning(f"معرف المجلد الخاص بـ {output_dir} غير موجود!")
+        return
+
+    if not GDRIVE_CREDENTIALS_JSON:
+        logger.error("لم يتم العثور على متغير البيئة GDRIVE_CREDENTIALS_JSON!")
         return
 
     if clean_old_dir and os.path.exists(clean_old_dir):
         shutil.rmtree(clean_old_dir, ignore_errors=True)
-        logger.info(f"تم مسح المجلد القديم: {clean_old_dir}")
 
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"بدأ تحميل الفيديوهات عبر yt-dlp إلى المجلد: {output_dir} ...")
+    logger.info(f"بدأ تحميل الفيديوهات عبر Google API إلى {output_dir} ...")
 
     def _download():
-        # إعدادات yt-dlp
-        ydl_opts = {
-            # تنسيق اسم الملف: يحافظ على الاسم الأصلي للملف في جوجل درايف
-            'outtmpl': f'{output_dir}/%(title)s.%(ext)s', 
-            'quiet': False,
-            'no_warnings': True,
-            # تخطي الملفات الموجودة مسبقاً لتوفير الوقت
-            'ignoreerrors': True, 
-        }
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            return True, "تم"
+            import json
+            creds_dict = json.loads(GDRIVE_CREDENTIALS_JSON)
+            creds = service_account.Credentials.from_service_account_info(
+                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+            service = build('drive', 'v3', credentials=creds)
+
+            # البحث عن جميع الملفات داخل المجلد (mp4 فقط)
+            query = f"'{folder_id}' in parents and mimeType='video/mp4' and trashed=false"
+            results = service.files().list(
+                q=query, pageSize=200, fields="nextPageToken, files(id, name)",
+                orderBy="name"
+            ).execute()
+            items = results.get('files', [])
+
+            if not items:
+                logger.warning("لم يتم العثور على ملفات mp4 في المجلد.")
+                return False, "المجلد فارغ أو لا توجد صلاحيات"
+
+            for item in items:
+                file_id = item['id']
+                file_name = item['name']
+                file_path = os.path.join(output_dir, file_name)
+
+                if os.path.exists(file_path):
+                    continue
+
+                request = service.files().get_media(fileId=file_id)
+                fh = io.FileIO(file_path, mode='wb')
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
+                    
+            return True, "تم بنجاح"
         except Exception as e:
             return False, str(e)
 
@@ -112,9 +142,11 @@ async def download_videos_from_drive(url: str, output_dir: str, clean_old_dir: s
         success, result = await loop.run_in_executor(pool, _download)
 
     if success:
-        logger.info(f"اكتملت محاولة التحميل للمجلد {output_dir}.")
+        logger.info(f"اكتمل تحميل المجلد {output_dir} عبر API.")
     else:
-        logger.error(f"فشل التحميل عبر yt-dlp للمجلد {output_dir}. رسالة الخطأ: {result}")
+        logger.error(f"خطأ في API أثناء تحميل {output_dir}: {result}")
+
+
 async def get_video_duration(filename: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
