@@ -226,11 +226,37 @@ async def start_video_stream():
                         })
 
                         # تشغيل البث عبر FFmpeg لدفع الفيديو إلى سيرفر تيلغرام مباشرة
+                        # ffmpeg_proc = await asyncio.create_subprocess_exec(
+                        #     "ffmpeg", "-re", "-i", video_path,
+                        #     "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
+                        #     "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
+                        #     stdout=asyncio.subprocess.DEVNULL,
+                        #     stderr=asyncio.subprocess.DEVNULL
+                        # )
+
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
-                            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-                            "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
-                            stdout=asyncio.subprocess.DEVNULL,
+                            
+                            # 1. إعدادات الفيديو (تقليل جذري للاستهلاك)
+                            "-c:v", "libx264",         # إعادة تشفير الفيديو (بدلاً من copy)
+                            "-vf", "scale=640:-2",     # تصغير الدقة إلى عرض 640 بكسل (مناسب جداً للهواتف)
+                            "-r", "5",                 # 5 إطارات في الثانية فقط (بما أن الصورة شبه ثابتة)
+                            "-b:v", "150k",            # الحد الأقصى لمعدل نقل بيانات الفيديو: 150 كيلوبت/ثانية
+                            "-preset", "veryfast",     # تسريع عملية التشفير لتخفيف العبء على معالج السيرفر المجاني
+                            "-tune", "stillimage",     # تحسين التشفير للصور شبه الثابتة (مثل النصوص)
+                            
+                            # 2. إعدادات الصوت (جودة مقبولة بحجم أصغر)
+                            "-c:a", "aac",
+                            "-b:a", "64k",             # تقليل معدل نقل الصوت إلى 64 كيلوبت/ثانية (جيد للصوت البشري)
+                            "-ar", "44100",            # معدل أخذ العينات
+                            "-ac", "1",                # تحويل الصوت إلى Mono (قناة واحدة) بدلاً من Stereo لتوفير نصف المساحة
+                            
+                            # 3. إعدادات الإخراج
+                            "-f", "flv", 
+                            "-flvflags", "no_duration_filesize", 
+                            RTMP_URL,
+                            
+                            stdout=asyncio.subprocess.DEVNULL, 
                             stderr=asyncio.subprocess.DEVNULL
                         )
                         logger.info(f"بدأ بث RTMP: سورة {surah_name}")
