@@ -75,66 +75,45 @@ for i in range(1, 115):
         video_files.append((i, f"vid3/{file_name}"))
 
 
-async def download_videos_from_drive(folder_id: str, output_dir: str, clean_old_dir: str = None):
-    if not folder_id or not GDRIVE_CREDENTIALS_JSON:
-        logger.error("بيانات المجلد أو الـ JSON مفقودة.")
-        return
-
-    if clean_old_dir and os.path.exists(clean_old_dir):
-        shutil.rmtree(clean_old_dir, ignore_errors=True)
+async def download_videos_from_drive(folder_id: str, output_dir: str, expected_count: int = 0):
+    if not folder_id or not GDRIVE_CREDENTIALS_JSON: return
 
     os.makedirs(output_dir, exist_ok=True)
-    logger.info(f"بدأ تحميل الفيديوهات عبر Google API إلى {output_dir} ...")
-    stream_state["status"] = f"جاري تحميل ملفات {output_dir}..."
+
+    # فحص ذكي: هل الملفات موجودة مسبقاً ومكتملة؟
+    existing_files = [f for f in os.listdir(output_dir) if f.endswith('.mp4') and os.path.getsize(os.path.join(output_dir, f)) > 0]
+    if len(existing_files) >= expected_count and expected_count > 0:
+        logger.info(f"المجلد {output_dir} مكتمل مسبقاً (يحتوي على {len(existing_files)} ملف). سيتم تخطي التحميل لتوفير الموارد.")
+        return
+
+    stream_state["status"] = f"جاري تحميل {output_dir}..."
 
     def _download():
         try:
             import json
             creds_dict = json.loads(GDRIVE_CREDENTIALS_JSON)
             creds = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
+                creds_dict, scopes=['https://www.googleapis.com/auth/drive.readonly'])
             service = build('drive', 'v3', credentials=creds)
 
             query = f"'{folder_id}' in parents and mimeType='video/mp4' and trashed=false"
-            results = service.files().list(
-                q=query, pageSize=200, fields="nextPageToken, files(id, name)",
-                orderBy="name"
-            ).execute()
+            results = service.files().list(q=query, pageSize=200, fields="nextPageToken, files(id, name)", orderBy="name").execute()
             items = results.get('files', [])
 
-            if not items:
-                return False, "المجلد فارغ"
-
             for item in items:
-                file_id = item['id']
-                file_name = item['name']
-                file_path = os.path.join(output_dir, file_name)
-
-                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                    continue
-
-                request = service.files().get_media(fileId=file_id)
+                file_path = os.path.join(output_dir, item['name'])
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0: continue
+                request = service.files().get_media(fileId=item['id'])
                 fh = io.FileIO(file_path, mode='wb')
                 downloader = MediaIoBaseDownload(fh, request)
                 done = False
-                while not done:
-                    status, done = downloader.next_chunk()
-                    
+                while not done: _, done = downloader.next_chunk()
             return True, "نجاح"
-        except Exception as e:
-            return False, str(e)
+        except Exception as e: return False, str(e)
 
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        success, result = await loop.run_in_executor(pool, _download)
-
-    if success:
-        logger.info(f"اكتمل تحميل المجلد {output_dir}.")
-    else:
-        logger.error(f"خطأ تحميل API للمجلد {output_dir}: {result}")
-
-
+        await loop.run_in_executor(pool, _download)
 async def get_video_duration(filename: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -152,14 +131,19 @@ async def get_video_duration(filename: str) -> float:
 
 
 async def start_video_stream():
-    if not RTMP_URL:
-        logger.critical("متغير RTMP_URL غير موجود! لا يمكن بدء البث.")
+    if not RTMP_URL or not SESSION_STRING:
+        logger.critical("متغير RTMP_URL أو SESSION_STRING مفقود!")
         return
+
+    app = Client("attendance_bot", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
+    app.add_handler(RawUpdateHandler(raw_update_handler))
+    await app.start()
+    logger.info("✅ نظام تتبع الحضور يعمل الآن ويراقب القناة.")
 
     prefetch_task = None
     try:
-        stream_state["status"] = "جاري تحميل الدفعة الأولى..."
-        await download_videos_from_drive(FOLDER_URL_1, "vid")
+        # 50 هو العدد المتوقع لسور المجلد الأول (الفاتحة إلى ق)
+        await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
 
         while True:
             i = 0
@@ -170,129 +154,75 @@ async def start_video_stream():
 
                 surah_num, video_path = video_files[i]
                 surah_name = SURAH_NAMES[surah_num - 1]
-                next_surah_name = SURAH_NAMES[surah_num % 114]
                 stream_state["force_skip"] = False
 
-                # التحميل المسبق
-                if surah_num == 45:
-                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2"))
-                elif surah_num == 51 and prefetch_task:
-                    await prefetch_task
-                    shutil.rmtree("vid", ignore_errors=True)
-                elif surah_num == 90:
-                    prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3"))
-                elif surah_num == 101 and prefetch_task:
-                    await prefetch_task
-                    shutil.rmtree("vid2", ignore_errors=True)
+                # التحميل المسبق بدون مسح الملفات القديمة
+                if surah_num == 45: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
+                elif surah_num == 51 and prefetch_task: await prefetch_task
+                elif surah_num == 90: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
+                elif surah_num == 101 and prefetch_task: await prefetch_task
 
                 is_played = False
-                retry_count = 0
-                
                 while not is_played and not stream_state["force_skip"] and stream_state["target_surah_index"] is None:
-                    if not os.path.exists(video_path):
-                        duration = 0.0
-                    else:
-                        duration = await get_video_duration(video_path)
-
+                    duration = await get_video_duration(video_path) if os.path.exists(video_path) else 0.0
+                    
                     if duration == 0.0:
-                        retry_count += 1
-                        logger.error(f"الملف {video_path} مفقود/معطوب. محاولة {retry_count}")
-                        stream_state["status"] = f"إعادة تحميل {surah_name} ({retry_count})..."
-                        
-                        if os.path.exists(video_path):
-                            os.remove(video_path)
-                            
-                        if 1 <= surah_num <= 50:
-                            await download_videos_from_drive(FOLDER_URL_1, "vid")
-                        elif 51 <= surah_num <= 100:
-                            await download_videos_from_drive(FOLDER_URL_2, "vid2")
-                        else:
-                            await download_videos_from_drive(FOLDER_URL_3, "vid3")
-                            
-                        await asyncio.sleep(5)
+                        stream_state["status"] = f"إعادة تحميل {surah_name}..."
+                        if os.path.exists(video_path): os.remove(video_path)
+                        if 1 <= surah_num <= 50: await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
+                        elif 51 <= surah_num <= 100: await download_videos_from_drive(FOLDER_URL_2, "vid2", 50)
+                        else: await download_videos_from_drive(FOLDER_URL_3, "vid3", 14)
                         continue
 
                     try:
                         stream_state.update({
-                            "status": "يبث مباشرة عبر RTMP 🟢",
-                            "is_streaming": True,
-                            "current_surah_index": surah_num,
-                            "current_surah_name": f"سورة {surah_name}",
-                            "next_surah_name": f"سورة {next_surah_name}",
-                            "current_file": video_path,
-                            "duration_seconds": round(duration, 1),
-                            "started_at_ts": time.time(),
-                            "last_error": None,
+                            "status": "يبث مباشرة 🟢 (وضع التوفير)", "is_streaming": True, "current_surah_index": surah_num,
+                            "current_surah_name": surah_name, "duration_seconds": round(duration, 1), "started_at_ts": time.time()
                         })
 
-                        # تشغيل البث عبر FFmpeg لدفع الفيديو إلى سيرفر تيلغرام مباشرة
-                        # ffmpeg_proc = await asyncio.create_subprocess_exec(
-                        #     "ffmpeg", "-re", "-i", video_path,
-                        #     "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-                        #     "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
-                        #     stdout=asyncio.subprocess.DEVNULL,
-                        #     stderr=asyncio.subprocess.DEVNULL
-                        # )
-
+                        # إعدادات FFmpeg المخصصة للاتصالات الضعيفة جداً
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
                             
-                            # 1. إعدادات الفيديو (تقليل جذري للاستهلاك)
-                            "-c:v", "libx264",         # إعادة تشفير الفيديو (بدلاً من copy)
-                            "-vf", "scale=640:-2",     # تصغير الدقة إلى عرض 640 بكسل (مناسب جداً للهواتف)
-                            "-r", "5",                 # 5 إطارات في الثانية فقط (بما أن الصورة شبه ثابتة)
-                            "-b:v", "150k",            # الحد الأقصى لمعدل نقل بيانات الفيديو: 150 كيلوبت/ثانية
-                            "-preset", "veryfast",     # تسريع عملية التشفير لتخفيف العبء على معالج السيرفر المجاني
-                            "-tune", "stillimage",     # تحسين التشفير للصور شبه الثابتة (مثل النصوص)
+                            # إعدادات الفيديو (360p, 1 إطار في الثانية, 25 كيلوبت)
+                            "-c:v", "libx264",
+                            "-vf", "scale=-2:360,fps=1",
+                            "-b:v", "25k",
+                            "-maxrate", "35k",
+                            "-bufsize", "70k",
+                            "-preset", "ultrafast",
+                            "-tune", "stillimage",
+                            "-g", "2",
                             
-                            # 2. إعدادات الصوت (جودة مقبولة بحجم أصغر)
+                            # إعدادات الصوت (Mono, 32 كيلوبت، معدل عينات 22050)
                             "-c:a", "aac",
-                            "-b:a", "64k",             # تقليل معدل نقل الصوت إلى 64 كيلوبت/ثانية (جيد للصوت البشري)
-                            "-ar", "44100",            # معدل أخذ العينات
-                            "-ac", "1",                # تحويل الصوت إلى Mono (قناة واحدة) بدلاً من Stereo لتوفير نصف المساحة
+                            "-b:a", "32k",
+                            "-ac", "1",
+                            "-ar", "22050",
                             
-                            # 3. إعدادات الإخراج
-                            "-f", "flv", 
-                            "-flvflags", "no_duration_filesize", 
-                            RTMP_URL,
-                            
-                            stdout=asyncio.subprocess.DEVNULL, 
-                            stderr=asyncio.subprocess.DEVNULL
+                            "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
+                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
-                        logger.info(f"بدأ بث RTMP: سورة {surah_name}")
 
-                        # مراقبة العملية والاستجابة لأمر التخطي
                         while ffmpeg_proc.returncode is None:
                             if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
                                 ffmpeg_proc.terminate()
-                                logger.info(f"تم تخطي السورة {surah_name}")
                                 break
                             await asyncio.sleep(1)
 
                         is_played = True
-
                     except Exception as e:
-                        err_msg = str(e)
-                        logger.error(f"حدث خطأ أثناء بث {video_path}: {err_msg}")
-                        stream_state["last_error"] = err_msg
+                        logger.error(f"خطأ بث {video_path}: {e}")
                         await asyncio.sleep(5)
                 
-                if stream_state["target_surah_index"] is None:
-                    i += 1
+                if stream_state["target_surah_index"] is None: i += 1
 
             stream_state["completed_khatmas"] += 1
-            stream_state["status"] = "اكتملت الختمة، جاري التحضير..."
-            await download_videos_from_drive(FOLDER_URL_1, "vid", clean_old_dir="vid3")
-
-    except asyncio.CancelledError:
-        logger.info("تم إيقاف مهمة البث.")
-    except Exception as e:
-        logger.critical(f"خطأ حرج في البث: {e}")
-        stream_state["status"] = f"توقف بسبب خطأ: {e}"
-        stream_state["is_streaming"] = False
-        stream_state["last_error"] = str(e)
-
-
+            
+            # فحص المجلد الأول فقط لبدء الختمة الجديدة (سيتخطى إذا كانت الملفات موجودة)
+            await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
+    finally:
+        await app.stop()
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     stream_task = asyncio.create_task(start_video_stream())
