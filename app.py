@@ -8,7 +8,6 @@ import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
@@ -21,7 +20,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QuranStreamer-RTMP")
 
-# متغيرات البيئة الجديدة للـ RTMP
+# متغيرات البيئة الأساسية
 RTMP_URL = os.getenv("RTMP_URL", "")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "قناتك")
 FOLDER_URL_1 = os.getenv("FOLDER_URL_1", "")
@@ -74,19 +73,17 @@ for i in range(1, 115):
     else:
         video_files.append((i, f"vid3/{file_name}"))
 
-
 async def download_videos_from_drive(folder_id: str, output_dir: str, expected_count: int = 0):
     if not folder_id or not GDRIVE_CREDENTIALS_JSON: return
-
     os.makedirs(output_dir, exist_ok=True)
 
     # فحص ذكي: هل الملفات موجودة مسبقاً ومكتملة؟
     existing_files = [f for f in os.listdir(output_dir) if f.endswith('.mp4') and os.path.getsize(os.path.join(output_dir, f)) > 0]
     if len(existing_files) >= expected_count and expected_count > 0:
-        logger.info(f"المجلد {output_dir} مكتمل مسبقاً (يحتوي على {len(existing_files)} ملف). سيتم تخطي التحميل لتوفير الموارد.")
+        logger.info(f"المجلد {output_dir} مكتمل مسبقاً. سيتم تخطي التحميل لتوفير الموارد.")
         return
 
-    stream_state["status"] = f"جاري تحميل {output_dir}..."
+    stream_state["status"] = f"جاري تحميل دفعة من جوجل درايف..."
 
     def _download():
         try:
@@ -114,6 +111,7 @@ async def download_videos_from_drive(folder_id: str, output_dir: str, expected_c
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
         await loop.run_in_executor(pool, _download)
+
 async def get_video_duration(filename: str) -> float:
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -133,24 +131,11 @@ async def get_video_duration(filename: str) -> float:
 async def start_video_stream():
     if not RTMP_URL:
         logger.critical("متغير RTMP_URL مفقود! لا يمكن بدء البث.")
+        stream_state["status"] = "خطأ: رابط RTMP مفقود."
         return
 
-    # 1. تشغيل نظام الحضور في مهمة خلفية (غير معطلة للبث)
-    async def run_attendance():
-        if not SESSION_STRING:
-            logger.warning("SESSION_STRING مفقود. سيتم تخطي نظام الحضور.")
-            return
-        try:
-            app = Client("attendance_bot", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
-            app.add_handler(RawUpdateHandler(raw_update_handler))
-            await app.start()
-            logger.info("✅ نظام تتبع الحضور يعمل الآن ويراقب القناة.")
-        except Exception as e:
-            logger.error(f"فشل تشغيل نظام الحضور: {e}")
+    # تم إزالة كود نظام الحضور الذي كان يسبب المشكلة
 
-    asyncio.create_task(run_attendance())
-
-    # 2. بدء نظام تحميل وبث الفيديوهات فوراً
     prefetch_task = None
     try:
         stream_state["status"] = "جاري الفحص والتحميل..."
@@ -167,7 +152,7 @@ async def start_video_stream():
                 surah_name = SURAH_NAMES[surah_num - 1]
                 stream_state["force_skip"] = False
 
-                # التحميل المسبق الذكي (يفحص قبل التحميل ولن يحمل إذا كانت الملفات موجودة)
+                # التحميل المسبق الذكي
                 if surah_num == 45: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
                 elif surah_num == 51 and prefetch_task: await prefetch_task
                 elif surah_num == 90: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
@@ -184,7 +169,6 @@ async def start_video_stream():
                         stream_state["status"] = f"جاري تحميل سورة {surah_name} ({retry_count})..."
                         if os.path.exists(video_path): os.remove(video_path)
                         
-                        # محاولة تحميل المجلد المرتبط
                         if 1 <= surah_num <= 50: await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
                         elif 51 <= surah_num <= 100: await download_videos_from_drive(FOLDER_URL_2, "vid2", 50)
                         else: await download_videos_from_drive(FOLDER_URL_3, "vid3", 14)
@@ -203,11 +187,8 @@ async def start_video_stream():
                             "last_error": None
                         })
 
-                        # محرك البث السريع والموفر جداً للبيانات (480p)
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
-                            
-                            # إعدادات الفيديو (360p, 1 إطار, 25 كيلوبت)
                             "-c:v", "libx264",
                             "-vf", "scale=-2:360,fps=1",
                             "-b:v", "25k",
@@ -216,18 +197,14 @@ async def start_video_stream():
                             "-preset", "ultrafast",
                             "-tune", "stillimage",
                             "-g", "2",
-                            
-                            # إعدادات الصوت (Mono, 32 كيلوبت، معدل عينات 22050)
                             "-c:a", "aac",
                             "-b:a", "32k",
                             "-ac", "1",
                             "-ar", "22050",
-                            
                             "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
 
-                        # مراقبة مستمرة للبث للسماح بالتخطي الفوري
                         while ffmpeg_proc.returncode is None:
                             if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
                                 ffmpeg_proc.terminate()
@@ -245,7 +222,6 @@ async def start_video_stream():
             stream_state["completed_khatmas"] += 1
             stream_state["status"] = "اكتملت الختمة، جاري الفحص لإعادتها..."
             
-            # فحص المجلد الأول بدون حذفه (لن يحمل شيئاً إذا كان متوفراً بفضل الفحص الذكي)
             await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
 
     except asyncio.CancelledError:
@@ -256,13 +232,11 @@ async def start_video_stream():
         stream_state["is_streaming"] = False
         stream_state["last_error"] = str(e)
 
-        
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     stream_task = asyncio.create_task(start_video_stream())
     yield
     stream_task.cancel()
-
 
 web_app = FastAPI(title="لوحة البث المباشر للقرآن الكريم (RTMP)", lifespan=lifespan)
 
