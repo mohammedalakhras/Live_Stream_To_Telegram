@@ -189,18 +189,24 @@ async def start_video_stream():
 
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
+                            
+                            # إعدادات الفيديو (360p, 10 إطارات, 100 كيلوبت)
                             "-c:v", "libx264",
-                            "-vf", "scale=-2:360,fps=1",
-                            "-b:v", "25k",
-                            "-maxrate", "35k",
-                            "-bufsize", "70k",
+                            "-vf", "scale=-2:360,fps=10",
+                            "-pix_fmt", "yuv420p",        # [مهم جداً] هذا السطر يمنع الشاشة السوداء في تيلغرام
+                            "-b:v", "100k",               # رفعنا الدقة قليلاً لكي تظهر الصورة
+                            "-maxrate", "150k",
+                            "-bufsize", "300k",
                             "-preset", "ultrafast",
                             "-tune", "stillimage",
-                            "-g", "2",
+                            "-g", "20",                   # إنشاء إطار رئيسي (Keyframe) كل ثانيتين لتسريع تحميل البث للمستمعين
+                            
+                            # إعدادات الصوت (Mono, 32 كيلوبت، معدل عينات 22050)
                             "-c:a", "aac",
                             "-b:a", "32k",
                             "-ac", "1",
                             "-ar", "22050",
+                            
                             "-f", "flv", "-flvflags", "no_duration_filesize", RTMP_URL,
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
