@@ -131,18 +131,29 @@ async def get_video_duration(filename: str) -> float:
 
 
 async def start_video_stream():
-    if not RTMP_URL or not SESSION_STRING:
-        logger.critical("متغير RTMP_URL أو SESSION_STRING مفقود!")
+    if not RTMP_URL:
+        logger.critical("متغير RTMP_URL مفقود! لا يمكن بدء البث.")
         return
 
-    app = Client("attendance_bot", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
-    app.add_handler(RawUpdateHandler(raw_update_handler))
-    await app.start()
-    logger.info("✅ نظام تتبع الحضور يعمل الآن ويراقب القناة.")
+    # 1. تشغيل نظام الحضور في مهمة خلفية (غير معطلة للبث)
+    async def run_attendance():
+        if not SESSION_STRING:
+            logger.warning("SESSION_STRING مفقود. سيتم تخطي نظام الحضور.")
+            return
+        try:
+            app = Client("attendance_bot", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH)
+            app.add_handler(RawUpdateHandler(raw_update_handler))
+            await app.start()
+            logger.info("✅ نظام تتبع الحضور يعمل الآن ويراقب القناة.")
+        except Exception as e:
+            logger.error(f"فشل تشغيل نظام الحضور: {e}")
 
+    asyncio.create_task(run_attendance())
+
+    # 2. بدء نظام تحميل وبث الفيديوهات فوراً
     prefetch_task = None
     try:
-        # 50 هو العدد المتوقع لسور المجلد الأول (الفاتحة إلى ق)
+        stream_state["status"] = "جاري الفحص والتحميل..."
         await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
 
         while True:
@@ -156,35 +167,47 @@ async def start_video_stream():
                 surah_name = SURAH_NAMES[surah_num - 1]
                 stream_state["force_skip"] = False
 
-                # التحميل المسبق بدون مسح الملفات القديمة
+                # التحميل المسبق الذكي (يفحص قبل التحميل ولن يحمل إذا كانت الملفات موجودة)
                 if surah_num == 45: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_2, "vid2", 50))
                 elif surah_num == 51 and prefetch_task: await prefetch_task
                 elif surah_num == 90: prefetch_task = asyncio.create_task(download_videos_from_drive(FOLDER_URL_3, "vid3", 14))
                 elif surah_num == 101 and prefetch_task: await prefetch_task
 
                 is_played = False
+                retry_count = 0
+                
                 while not is_played and not stream_state["force_skip"] and stream_state["target_surah_index"] is None:
                     duration = await get_video_duration(video_path) if os.path.exists(video_path) else 0.0
                     
                     if duration == 0.0:
-                        stream_state["status"] = f"إعادة تحميل {surah_name}..."
+                        retry_count += 1
+                        stream_state["status"] = f"جاري تحميل سورة {surah_name} ({retry_count})..."
                         if os.path.exists(video_path): os.remove(video_path)
+                        
+                        # محاولة تحميل المجلد المرتبط
                         if 1 <= surah_num <= 50: await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
                         elif 51 <= surah_num <= 100: await download_videos_from_drive(FOLDER_URL_2, "vid2", 50)
                         else: await download_videos_from_drive(FOLDER_URL_3, "vid3", 14)
+                        
+                        await asyncio.sleep(3)
                         continue
 
                     try:
                         stream_state.update({
-                            "status": "يبث مباشرة 🟢 (وضع التوفير)", "is_streaming": True, "current_surah_index": surah_num,
-                            "current_surah_name": surah_name, "duration_seconds": round(duration, 1), "started_at_ts": time.time()
+                            "status": "يبث مباشرة 🟢 (توفير عالي)", 
+                            "is_streaming": True, 
+                            "current_surah_index": surah_num,
+                            "current_surah_name": f"سورة {surah_name}", 
+                            "duration_seconds": round(duration, 1), 
+                            "started_at_ts": time.time(),
+                            "last_error": None
                         })
 
-                        # إعدادات FFmpeg المخصصة للاتصالات الضعيفة جداً
+                        # محرك البث السريع والموفر جداً للبيانات (480p)
                         ffmpeg_proc = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-re", "-i", video_path,
                             
-                            # إعدادات الفيديو (360p, 1 إطار في الثانية, 25 كيلوبت)
+                            # إعدادات الفيديو (360p, 1 إطار, 25 كيلوبت)
                             "-c:v", "libx264",
                             "-vf", "scale=-2:360,fps=1",
                             "-b:v", "25k",
@@ -204,6 +227,7 @@ async def start_video_stream():
                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
                         )
 
+                        # مراقبة مستمرة للبث للسماح بالتخطي الفوري
                         while ffmpeg_proc.returncode is None:
                             if stream_state["force_skip"] or stream_state["target_surah_index"] is not None:
                                 ffmpeg_proc.terminate()
@@ -213,16 +237,26 @@ async def start_video_stream():
                         is_played = True
                     except Exception as e:
                         logger.error(f"خطأ بث {video_path}: {e}")
+                        stream_state["last_error"] = str(e)
                         await asyncio.sleep(5)
                 
                 if stream_state["target_surah_index"] is None: i += 1
 
             stream_state["completed_khatmas"] += 1
+            stream_state["status"] = "اكتملت الختمة، جاري الفحص لإعادتها..."
             
-            # فحص المجلد الأول فقط لبدء الختمة الجديدة (سيتخطى إذا كانت الملفات موجودة)
+            # فحص المجلد الأول بدون حذفه (لن يحمل شيئاً إذا كان متوفراً بفضل الفحص الذكي)
             await download_videos_from_drive(FOLDER_URL_1, "vid", 50)
-    finally:
-        await app.stop()
+
+    except asyncio.CancelledError:
+        logger.info("تم إيقاف مهمة البث المباشر.")
+    except Exception as e:
+        logger.critical(f"خطأ حرج في محرك البث: {e}")
+        stream_state["status"] = f"توقف بسبب خطأ: {e}"
+        stream_state["is_streaming"] = False
+        stream_state["last_error"] = str(e)
+
+        
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     stream_task = asyncio.create_task(start_video_stream())
